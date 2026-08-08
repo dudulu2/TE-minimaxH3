@@ -1,41 +1,31 @@
 #!/usr/bin/env python
-"""Install the MiniMax H3 "block_loop" hooks into ComfyUI's model file.
+"""Install/revert the MiniMax H3 block_loop hooks used by TE-Speed.
 
-The TE-Speed-MiniMaxH3-OSS node accelerates the MiniMax H3 DiT by patching
-the ("block_loop", 0) model hook. Stock ComfyUI's comfy/ldm/minimax/model.py
-does not expose that hook yet, so this script surgically adds it:
-
-  1. a _run_blocks(start, end) method (block-loop execution with slicing), and
-  2. a ("block_loop", 0) branch in the model forward that hands the loop to a
-     custom node when one is installed.
-
-Usage:
-    python patch_model.py                      # auto-locate ComfyUI and patch
-    python patch_model.py --comfy-ui <dir>     # explicit ComfyUI root
-    python patch_model.py --revert             # restore the .bak backup
-    python patch_model.py --check              # only report the hook status
-
-A backup is written next to the file (model.py.te_speed.bak) before patching.
+Safety rules:
+- Before patching an unmodified ComfyUI model.py, keep a matching stock backup
+  at model.py.te_speed.bak.
+- If ComfyUI was upgraded and an older backup no longer matches the new stock
+  model.py, preserve the old backup as *.stale-* and refresh the active backup.
+- --revert only restores a backup when the current model.py still contains the
+  TE-Speed hook. If ComfyUI already replaced the file with a stock/new version,
+  it will NOT overwrite that newer file with an old backup.
 """
 
 import argparse
 import ast
+import hashlib
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 TARGET = Path("comfy/ldm/minimax/model.py")
 BACKUP_SUFFIX = ".te_speed.bak"
 
 COMMON_ROOTS = [
-    Path("."),
-    Path(".."),
-    Path("ComfyUI"),
-    Path("../ComfyUI"),
-    Path("G:/ComfyUI-aki-v3/ComfyUI"),
-    Path("C:/ComfyUI"),
-    Path("D:/ComfyUI"),
-    Path("E:/ComfyUI"),
+    Path("."), Path(".."), Path("ComfyUI"), Path("../ComfyUI"),
+    Path("G:/ComfyUI-aki-v3/ComfyUI"), Path("C:/ComfyUI"),
+    Path("D:/ComfyUI"), Path("E:/ComfyUI"),
     Path("C:/Users/Administrator/ComfyUI"),
 ]
 
@@ -87,7 +77,8 @@ LOOP_RE = re.compile(
     r'.*?'
     r'        if prefetch_queue is not None:\n'
     r'            comfy\.model_prefetch\.prefetch_queue_pop\(prefetch_queue, device, None\)\n',
-    re.DOTALL)
+    re.DOTALL,
+)
 
 FORWARD_ANCHOR = "    def forward(self, x, timestep, context,"
 RUN_BLOCKS_ANCHOR = "    def _run_blocks(self, h, t_emb, mod_segments, rope_freqs, transformer_options, start=0, end=None):"
@@ -96,77 +87,100 @@ RUN_BLOCKS_ANCHOR = "    def _run_blocks(self, h, t_emb, mod_segments, rope_freq
 def find_model_file(comfy_ui=None):
     if comfy_ui is not None:
         p = Path(comfy_ui)
-        if not p.is_dir():
-            p = Path(comfy_ui) / "ComfyUI"
         for candidate in (p / TARGET, p / "ComfyUI" / TARGET):
             if candidate.is_file():
                 return candidate
-        raise SystemExit(f"error: no model file at {p / TARGET}")
+        raise SystemExit(f"error: no MiniMax H3 model file under {p}")
     for root in COMMON_ROOTS:
         for candidate in (root / TARGET, root / "ComfyUI" / TARGET):
             if candidate.is_file():
                 return candidate
-    raise SystemExit(
-        "error: could not locate ComfyUI. Pass --comfy-ui <ComfyUI root dir>, "
-        "e.g. --comfy-ui G:/ComfyUI-aki-v3/ComfyUI")
+    raise SystemExit("error: could not locate ComfyUI; pass --comfy-ui <ComfyUI root>")
 
 
 def hook_status(text):
-    has_run_blocks = RUN_BLOCKS_ANCHOR in text
-    has_loop_hook = '("block_loop", 0) in blocks_replace' in text
-    return has_run_blocks and has_loop_hook
+    return RUN_BLOCKS_ANCHOR in text and '("block_loop", 0) in blocks_replace' in text
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()[:12]
+
+
+def ensure_matching_backup(target):
+    backup = target.with_name(target.name + BACKUP_SUFFIX)
+    current = target.read_bytes()
+    if not backup.is_file():
+        shutil.copy2(target, backup)
+        print(f"[BAK] stock core saved: {backup}")
+        return backup
+
+    old = backup.read_bytes()
+    if old == current:
+        return backup
+
+    # Current is stock but changed since the old backup: likely a ComfyUI update.
+    # Preserve the stale backup and make a new backup matching this version.
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stale = backup.with_name(backup.name + f".stale-{stamp}-{digest(old)}")
+    shutil.copy2(backup, stale)
+    shutil.copy2(target, backup)
+    print(f"[BAK] ComfyUI core changed; old backup preserved as: {stale}")
+    print(f"[BAK] active backup refreshed for current core: {backup}")
+    return backup
 
 
 def apply_patch(text):
     if not LOOP_RE.search(text):
         raise SystemExit(
-            "error: could not find the stock block loop in the model file. "
-            "This ComfyUI version may differ; report it or patch manually.")
+            "error: stock MiniMax H3 block loop was not recognized. "
+            "ComfyUI may have changed; no modification was made."
+        )
     text = LOOP_RE.sub(HOOK_LOOP, text, count=1)
     if RUN_BLOCKS_ANCHOR not in text:
         if FORWARD_ANCHOR not in text:
-            raise SystemExit("error: could not find the MiniMaxH3Model.forward anchor.")
+            raise SystemExit("error: MiniMaxH3Model.forward anchor not found; no modification was made.")
         text = text.replace(FORWARD_ANCHOR, RUN_BLOCKS_METHOD + FORWARD_ANCHOR, 1)
     return text
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Install MiniMax H3 block_loop hooks into ComfyUI's minimax model.py")
-    parser.add_argument("--comfy-ui", help="ComfyUI root directory (auto-detected when omitted)")
-    parser.add_argument("--revert", action="store_true", help="restore the pre-patch backup")
-    parser.add_argument("--check", action="store_true", help="only report the hook status")
+    parser = argparse.ArgumentParser(description="Install/revert TE-Speed MiniMax H3 core hooks")
+    parser.add_argument("--comfy-ui", help="ComfyUI root directory")
+    parser.add_argument("--revert", action="store_true")
+    parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
 
     target = find_model_file(args.comfy_ui)
     text = target.read_text(encoding="utf-8")
+    backup = target.with_name(target.name + BACKUP_SUFFIX)
+
+    if args.check:
+        print(f"[{'ON' if hook_status(text) else 'OFF'}] TE-Speed core hook: {target}")
+        return
 
     if args.revert:
-        backup = target.with_name(target.name + BACKUP_SUFFIX)
+        if not hook_status(text):
+            print("[SAFE] Current model.py has no TE-Speed hook; leaving it untouched.")
+            print("       This avoids restoring an obsolete backup after a ComfyUI update.")
+            return
         if not backup.is_file():
-            raise SystemExit(f"error: no backup at {backup}")
+            raise SystemExit(f"error: hook is present but backup is missing: {backup}")
         shutil.copy2(backup, target)
-        print(f"TE-Speed-MiniMaxH3-OSS: restored {target} from backup.")
+        print(f"[RESTORE] core restored from matching backup: {backup}")
         return
 
     if hook_status(text):
-        print(f"TE-Speed-MiniMaxH3-OSS: hooks already present in {target}")
+        print(f"[OK] TE-Speed hooks already present: {target}")
         return
 
-    if args.check:
-        print(f"TE-Speed-MiniMaxH3-OSS: hooks MISSING in {target}")
-        return
-
-    backup = target.with_name(target.name + BACKUP_SUFFIX)
-    if not backup.is_file():
-        shutil.copy2(target, backup)
-        print(f"TE-Speed-MiniMaxH3-OSS: backup written to {backup}")
-
+    ensure_matching_backup(target)
     patched = apply_patch(text)
     ast.parse(patched)
-    assert hook_status(patched)
+    if not hook_status(patched):
+        raise SystemExit("error: internal verification failed; no modified file was written")
     target.write_text(patched, encoding="utf-8")
-    print(f"TE-Speed-MiniMaxH3-OSS: patched {target}")
-    print("Restart ComfyUI, then use the TESpeedMiniMaxH3 node. Revert any time with --revert.")
+    print(f"[PATCH] TE-Speed core hook installed: {target}")
+    print("Restart ComfyUI before using TESpeedMiniMaxH3.")
 
 
 if __name__ == "__main__":

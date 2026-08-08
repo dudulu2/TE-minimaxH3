@@ -1,0 +1,14 @@
+TE-Speed MiniMax H3 下载说明
+=============================
+
+GitHub 仓库：
+https://github.com/dudulu2/TE-minimaxH3
+
+ZIP 一键下载：
+https://github.com/dudulu2/TE-minimaxH3/archive/refs/heads/main.zip
+
+下载 ZIP 后解压，双击：
+一键安装TE加速.bat
+
+详细风险与使用方式请先阅读：
+TE加速_中文使用与风险说明.txt

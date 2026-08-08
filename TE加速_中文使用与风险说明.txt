@@ -1,0 +1,354 @@
+TE-Speed MiniMax H3 中文使用与风险说明
+========================================
+
+一、这是什么
+------------
+TE-Speed-MiniMaxH3-OSS 是给 ComfyUI 的 MiniMax H3 使用的块缓存加速节点。
+
+它不是新的模型，也不会替换你的 MiniMax H3 safetensors 文件。
+它做两件事：
+
+1. 给 ComfyUI 的 MiniMax H3 核心文件：
+
+   comfy\ldm\minimax\model.py
+
+   增加一个可被自定义节点调用的 block_loop 钩子。
+
+2. 在工作流中把：
+
+   UNETLoader.MODEL
+        ↓
+   TE-Speed-MiniMaxH3 (OSS)
+        ↓
+   BasicScheduler / BasicGuider
+
+   接起来。
+
+加速原理是：部分去噪步骤不再重复计算全部 Transformer blocks，而是重算前面一部分 block，并复用之前完整步骤留下的残差缓存。
+
+
+二、最简单的安装方法
+------------------
+1. 建议先完全关闭 ComfyUI。
+2. 双击：
+
+   一键安装TE加速.bat
+
+3. 如果安装器自动找到 MiniMaxH3 一键安装目录，会直接使用。
+   如果没找到，会弹出目录选择框。
+
+4. 请选择 ComfyUI 根目录。
+   正确目录里面通常能直接看到：
+
+   main.py
+   comfy
+   custom_nodes
+   models
+   user
+
+   例如：
+
+   D:\MiniMaxH3\ComfyUI
+
+5. 安装器会自动：
+
+   - 安装 TE-Speed 自定义节点；
+   - 备份原始 model.py；
+   - 给 MiniMax H3 model.py 打可回滚补丁；
+   - 扫描 user\default\workflows；
+   - 对结构符合预期的 MiniMax H3 工作流加入 TE 节点；
+   - 给被修改的工作流保存原始备份。
+
+6. 完成以后，必须完全关闭并重新启动 ComfyUI。
+
+
+三、怎么确认安装成功
+------------------
+打开 ComfyUI 后，在节点搜索中输入：
+
+   TE-Speed
+
+应该能找到：
+
+   TE-Speed-MiniMaxH3 (OSS)
+
+节点类型名是：
+
+   TESpeedMiniMaxH3
+
+如果一键安装器已经成功修改了你的 MiniMax H3 工作流，打开工作流后应该能看到这个节点位于模型加载器和采样调度/Guider之间。
+
+
+四、默认参数
+------------
+默认参数：
+
+processing_control_value = 0.12
+processing_percent_1      = 0.10
+processing_percent_2      = 0.90
+mcs                       = 2
+cache_depth               = 0.75
+device                    = auto
+
+含义：
+
+processing_control_value
+  控制相邻去噪步变化多小时才允许复用缓存。
+  数值越高，一般越激进；数值越低越保守。
+  设置为 0 可以关闭缓存加速。
+
+processing_percent_1 / processing_percent_2
+  只在去噪过程的中段启用缓存。
+  默认前 10% 和后 10% 始终完整计算。
+
+mcs
+  最多允许连续多少个缓存步。
+  默认 2。
+  设置为 0 可以关闭缓存加速。
+
+cache_depth
+  缓存尾部 Transformer blocks 的比例。
+  默认 0.75。
+  越高理论上越快，但与完整计算的差异风险也会增加。
+  设置为 0 可以关闭缓存加速。
+
+device
+  auto / gpu：缓存通常留在计算设备，速度更直接，但会占用一些显存。
+  cpu：把残差缓存放在内存，节省显存，但会增加 CPU/RAM/PCIe 搬运开销。
+
+
+五、速度能快多少
+--------------
+默认参数的目标/参考值大约是 45% 左右的计算节省或墙钟时间提速量级，但这不是固定承诺。
+
+实际速度受很多因素影响：
+
+- GPU 型号；
+- 视频分辨率；
+- 视频长度；
+- 采样步数；
+- 显存是否足够；
+- 是否频繁在显存、内存、分页文件之间 offload；
+- Text Encoder / VAE 是否成为新的瓶颈；
+- 其他 ComfyUI 节点；
+- 其他加速插件。
+
+所以有些机器可能接近参考值，有些机器低于参考值，也有可能某些工作流几乎看不到收益。
+
+
+六、最重要的画质风险
+------------------
+TE-Speed 属于近似缓存计算，不等同于每一步完整跑全部 Transformer blocks。
+
+因此理论上可能出现：
+
+- 细节轻微变化；
+- 运动轨迹变化；
+- 人脸/手部小细节变化；
+- 长视频中误差累积更明显；
+- 高分辨率、复杂动作、镜头快速变化时差异更容易出现。
+
+建议第一次测试时：
+
+1. 固定同一个 seed；
+2. 同一个提示词；
+3. 同一个分辨率和时长；
+4. 先关闭 TE 跑一次；
+5. 再用默认 TE 参数跑一次；
+6. 对比画质和耗时。
+
+如果画质变化不能接受：
+
+- 降低 cache_depth，例如 0.50 / 0.60；
+- 降低 processing_control_value；
+- 降低 mcs；
+- 或直接把 processing_control_value / mcs / cache_depth 任意一个设为 0，关闭缓存。
+
+
+七、核心文件修改风险
+------------------
+TE-Speed 会修改：
+
+   ComfyUI\comfy\ldm\minimax\model.py
+
+这是本插件最大的兼容风险。
+
+安装器会先创建：
+
+   model.py.te_speed.bak
+
+再写入补丁。
+
+如果当前 ComfyUI 版本的 MiniMax H3 model.py 结构和预期不同，补丁程序会停止，不会猜测位置后强行修改。
+
+特别注意：
+
+ComfyUI 更新以后，model.py 可能变化。
+这时旧版本 backup 不能直接拿来覆盖新版本核心文件。
+
+本仓库的一键回退脚本已经做了保护：
+
+- 如果当前 model.py 仍然含 TE hook，才允许从对应 backup 恢复；
+- 如果当前 model.py 已经没有 TE hook，例如被 ComfyUI 更新成了新版本，回退脚本会保持新文件不动；
+- 再次安装 TE 时，如果检测到 ComfyUI 核心版本已经变化，会把旧 backup 另存为 stale 备份，再为当前版本建立新的 backup。
+
+
+八、工作流修改风险
+----------------
+自动工作流补丁只处理它能明确识别的 MiniMax H3 子图。
+
+只有同时找到预期的：
+
+- UNETLoader
+- BasicScheduler
+- BasicGuider
+- MiniMax H3 相关节点
+- 正确的 MODEL 接线
+
+才会插入 TE 节点。
+
+如果结构不符合预期，会显示 WARN 并跳过，不会猜接线。
+
+修改前会保存：
+
+   原工作流.json.tespeed_wf.bak
+
+回退前还会额外保存当前版本：
+
+   原工作流.json.tespeed_wf.before_revert.bak
+
+这是为了防止你安装 TE 后又手动编辑过工作流，回退时把后续修改永久丢掉。
+
+
+九、和其他加速插件一起用的风险
+----------------------------
+TE-Speed 会接管 MiniMax H3 的 block_loop，并使用 ComfyUI model patch replace 机制。
+
+如果同时叠加：
+
+- SageAttention；
+- TeaCache / EasyCache；
+- 其他 block cache；
+- 其他会替换 MiniMax H3 attention / transformer forward 的节点；
+- Torch Compile 类节点；
+
+理论上可能互相兼容，也可能出现：
+
+- 加速收益重叠；
+- 加速反而下降；
+- 显存变化；
+- 结果差异变大；
+- 节点 patch 顺序冲突；
+- ComfyUI 报错。
+
+建议先单独验证 TE-Speed。
+确认 TE 单独稳定以后，再一次只增加一个其他加速组件做 A/B 测试。
+
+不要第一次就把多个加速节点全部叠上去，否则出问题后很难定位。
+
+
+十、显存和内存风险
+----------------
+device=auto/gpu：
+
+- 通常速度较好；
+- 会额外占用一定显存保存缓存残差。
+
+如果本来显存已经非常紧张，可能更容易 OOM。
+
+这时可以尝试：
+
+   device = cpu
+
+优点：
+
+- 减少部分显存压力。
+
+缺点：
+
+- 占用系统内存；
+- GPU/CPU 之间需要搬运；
+- 某些机器反而更慢。
+
+
+十一、一键回退
+------------
+如果出现：
+
+- ComfyUI 启动失败；
+- MiniMax H3 报错；
+- 画质不可接受；
+- 加速没有收益；
+- 想更新 ComfyUI 前先恢复原始状态；
+
+建议先完全关闭 ComfyUI，然后双击：
+
+   一键卸载并回退TE加速.bat
+
+它会：
+
+1. 安全检查当前 MiniMax H3 model.py；
+2. 只有当前文件仍然含 TE hook 时才恢复核心 backup；
+3. 恢复一键安装器自动修改过的工作流；
+4. 在恢复工作流前额外保存一份当前工作流；
+5. 删除 TE-Speed 自定义节点目录；
+6. 保留备份文件，方便人工救援。
+
+完成后重新启动 ComfyUI。
+
+
+十二、手动关闭 TE 而不卸载
+------------------------
+如果只是想临时比较速度/画质，不一定要卸载。
+
+可以把 TE 节点中的以下任意一个参数设为 0：
+
+   processing_control_value = 0
+
+或：
+
+   mcs = 0
+
+或：
+
+   cache_depth = 0
+
+这样节点会保留在工作流里，但缓存逻辑关闭，接近完整计算路径。
+
+也可以直接从工作流中绕过 TE 节点。
+
+
+十三、建议的使用顺序
+------------------
+第一次：
+
+1. 先确认原版 MiniMax H3 能正常生成；
+2. 固定 seed 跑一个 5 秒测试；
+3. 安装 TE；
+4. 用默认参数跑同一个任务；
+5. 比较耗时和画质；
+6. 确认稳定后再尝试 8 秒、10 秒、更高分辨率；
+7. 最后再考虑叠加其他加速插件。
+
+不要在原版 H3 还没验证成功时同时安装多个优化组件。
+
+
+十四、风险结论
+--------------
+整体风险级别：中等，可回滚。
+
+低风险部分：
+- 不修改模型 safetensors；
+- 不重新安装 Torch/CUDA；
+- 不修改 Python 环境依赖；
+- 工作流有逐字节原始备份；
+- 结构不符合预期会跳过。
+
+主要风险：
+- 会修改 ComfyUI MiniMax H3 核心 model.py；
+- ComfyUI 更新可能让补丁失效，需要重新适配；
+- 缓存属于近似计算，画质并非理论上 100% 等价；
+- 和其他加速 patch 叠加时兼容性需要逐项测试。
+
+如果你要求绝对稳定、绝对一致的最终成片：
+先用 TE 做速度测试和预览，重要最终输出建议保留一个关闭 TE 的完整计算版本进行对照。

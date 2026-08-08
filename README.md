@@ -2,6 +2,8 @@
 
 MiniMax H3 的可回滚块缓存加速节点。节点类型为 `TESpeedMiniMaxH3`，通过对 MiniMax H3 DiT 的部分 Transformer blocks 做缓存/残差校正，减少部分去噪步骤的重复计算。
 
+当前一键安装器会在 Windows CI 中直接使用 MiniMaxH3-Installer 固定的 ComfyUI commit `0764232429b8cfb10b79b6f186c8cb23e0b22897` 验证补丁与回退；其他更新版本若核心结构不匹配，补丁脚本会停止而不是强制修改。
+
 ## 最简单安装
 
 1. 下载本仓库 ZIP 并解压。

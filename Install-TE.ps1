@@ -17,8 +17,9 @@ function Select-ComfyRoot {
     if ($Requested) {
         $full = [IO.Path]::GetFullPath($Requested)
         if (Test-ComfyRoot $full) { return $full }
-        if (Test-ComfyRoot (Join-Path $full 'ComfyUI')) { return [IO.Path]::GetFullPath((Join-Path $full 'ComfyUI')) }
-        throw "指定目录不是可识别的 ComfyUI：$Requested"
+        $nested = Join-Path $full 'ComfyUI'
+        if (Test-ComfyRoot $nested) { return [IO.Path]::GetFullPath($nested) }
+        throw "The selected path is not a recognized ComfyUI root: $Requested"
     }
 
     $candidates = @(
@@ -36,16 +37,16 @@ function Select-ComfyRoot {
     }
 
     $dialog = New-Object Windows.Forms.FolderBrowserDialog
-    $dialog.Description = '请选择 ComfyUI 根目录（里面能看到 main.py、comfy、custom_nodes）'
+    $dialog.Description = 'Select the ComfyUI root folder containing main.py, comfy, and custom_nodes.'
     $dialog.ShowNewFolderButton = $false
     if ($dialog.ShowDialog() -ne [Windows.Forms.DialogResult]::OK) {
-        throw '用户取消了目录选择。'
+        throw 'Folder selection was cancelled.'
     }
     $selected = [IO.Path]::GetFullPath($dialog.SelectedPath)
     if (Test-ComfyRoot $selected) { return $selected }
     $nested = Join-Path $selected 'ComfyUI'
     if (Test-ComfyRoot $nested) { return [IO.Path]::GetFullPath($nested) }
-    throw "选择的目录不是可识别的 ComfyUI：$selected"
+    throw "The selected path is not a recognized ComfyUI root: $selected"
 }
 
 function Find-Python([string]$Root) {
@@ -64,7 +65,7 @@ function Find-Python([string]$Root) {
     if ($cmd) { return $cmd.Source }
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
-    throw '找不到 Python。MiniMaxH3 一键安装版通常位于 runtime\venv\Scripts\python.exe。'
+    throw 'Python was not found. MiniMaxH3 Installer normally provides runtime\venv\Scripts\python.exe.'
 }
 
 function Copy-IfDifferent([string]$Source, [string]$Destination) {
@@ -82,28 +83,33 @@ try {
 
     Write-Host "[1/5] ComfyUI: $comfy"
     Write-Host "[2/5] Python : $python"
-    Write-Host "[3/5] 安装 TE-Speed 节点..."
+    Write-Host '[3/5] Installing TE-Speed custom node...'
 
-    $payload = @('__init__.py','nodes.py','patch_model.py','tespeed_workflow_patch.py','README.md','TE加速_中文使用与风险说明.txt')
+    $payload = @('__init__.py','nodes.py','patch_model.py','tespeed_workflow_patch.py','README.md')
     foreach ($name in $payload) {
         $source = Join-Path $repoRoot $name
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "安装包缺少文件：$name" }
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Installer payload is missing: $name" }
         Copy-IfDifferent $source (Join-Path $plugin $name)
     }
+    foreach ($txt in @(Get-ChildItem -LiteralPath $repoRoot -Filter '*.txt' -File -ErrorAction SilentlyContinue)) {
+        Copy-IfDifferent $txt.FullName (Join-Path $plugin $txt.Name)
+    }
 
-    Write-Host "[4/5] 给 MiniMax H3 核心增加可回滚 hook..."
+    Write-Host '[4/5] Installing reversible MiniMax H3 core hook...'
     & $python (Join-Path $plugin 'patch_model.py') --comfy-ui $comfy
-    if ($LASTEXITCODE -ne 0) { throw "核心补丁失败，退出码 $LASTEXITCODE。未识别的 ComfyUI 版本不会被强行修改。" }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Core patch failed with exit code $LASTEXITCODE. An unrecognized ComfyUI version is not modified forcibly."
+    }
 
     $workflowDir = Join-Path $comfy 'user\default\workflows'
-    Write-Host "[5/5] 给现有 MiniMax H3 工作流加入 TE 节点..."
+    Write-Host '[5/5] Adding TE-Speed to recognized MiniMax H3 workflows...'
     if (Test-Path -LiteralPath $workflowDir -PathType Container) {
         & $python (Join-Path $plugin 'tespeed_workflow_patch.py') --add $workflowDir
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning '部分工作流结构与预期不同，已安全跳过；节点与核心 hook 已安装。'
+            Write-Warning 'Some workflows did not match the expected wiring and were safely skipped.'
         }
     } else {
-        Write-Warning "未找到工作流目录：$workflowDir。你仍可在 ComfyUI 中手动添加 TE-Speed-MiniMaxH3 (OSS) 节点。"
+        Write-Warning "Workflow directory was not found: $workflowDir. Add the TE-Speed node manually if needed."
     }
 
     $state = [ordered]@{
@@ -115,18 +121,18 @@ try {
     $state | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $plugin 'te-speed-install.json') -Encoding UTF8
 
     Write-Host ''
-    Write-Host 'TE-Speed 安装完成。请完全关闭并重新启动 ComfyUI。' -ForegroundColor Green
-    Write-Host '默认参数是 0.12 / 0.10 / 0.90 / mcs=2 / cache_depth=0.75。'
-    Write-Host '如遇到画质、兼容或启动问题，可运行“一键卸载并回退TE加速.bat”。'
+    Write-Host 'TE-Speed installation completed. Fully restart ComfyUI before use.' -ForegroundColor Green
+    Write-Host 'Defaults: threshold=0.12, window=0.10..0.90, mcs=2, cache_depth=0.75.'
+    Write-Host 'Use the one-click rollback BAT if compatibility or quality problems occur.'
     [Windows.Forms.MessageBox]::Show(
-        "TE-Speed 安装完成。`n`n请完全关闭并重新启动 ComfyUI 后再使用。`n`n遇到问题可运行“一键卸载并回退TE加速.bat”。",
+        "TE-Speed installation completed.`n`nFully close and restart ComfyUI before use.`n`nUse the rollback BAT if you encounter problems.",
         'TE-Speed MiniMax H3', 'OK', 'Information') | Out-Null
     exit 0
 } catch {
     Write-Host ''
-    Write-Host ("安装失败：" + $_.Exception.Message) -ForegroundColor Red
+    Write-Host ("Installation failed: " + $_.Exception.Message) -ForegroundColor Red
     [Windows.Forms.MessageBox]::Show(
-        "TE-Speed 安装没有完成：`n`n$($_.Exception.Message)`n`n请查看控制台信息。",
-        'TE-Speed 安装失败', 'OK', 'Error') | Out-Null
+        "TE-Speed installation did not complete.`n`n$($_.Exception.Message)`n`nSee the console for details.",
+        'TE-Speed installation failed', 'OK', 'Error') | Out-Null
     exit 1
 }

@@ -1,0 +1,79 @@
+name: Validate TE-Speed installer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile Python sources
+        shell: powershell
+        run: |
+          python -m py_compile nodes.py patch_model.py tespeed_workflow_patch.py
+
+      - name: Parse Windows PowerShell 5.1 installers
+        shell: powershell
+        run: |
+          foreach ($path in @('Install-TE.ps1','Uninstall-TE.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              exit 1
+            }
+          }
+
+      - name: Test patch and revert against bundled ComfyUI version
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'ComfyUI'
+          $targetDir = Join-Path $root 'comfy\ldm\minimax'
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          New-Item -ItemType File -Force -Path (Join-Path $root 'main.py') | Out-Null
+          $target = Join-Path $targetDir 'model.py'
+          $url = 'https://raw.githubusercontent.com/Comfy-Org/ComfyUI/0764232429b8cfb10b79b6f186c8cb23e0b22897/comfy/ldm/minimax/model.py'
+          Invoke-WebRequest -UseBasicParsing $url -OutFile $target
+          $stockHash = (Get-FileHash $target -Algorithm SHA256).Hash
+
+          python patch_model.py --comfy-ui $root
+          if ($LASTEXITCODE -ne 0) { throw 'Patch failed against bundled ComfyUI commit.' }
+          $patched = Get-Content $target -Raw
+          if ($patched -notmatch 'TE-Speed-MiniMaxH3-OSS hook' -or $patched -notmatch 'def _run_blocks') {
+            throw 'Expected TE-Speed hooks were not installed.'
+          }
+
+          python patch_model.py --comfy-ui $root --revert
+          if ($LASTEXITCODE -ne 0) { throw 'Revert failed.' }
+          $restoredHash = (Get-FileHash $target -Algorithm SHA256).Hash
+          if ($restoredHash -ne $stockHash) { throw 'Revert did not restore the original bytes.' }
+
+      - name: Test update-safe revert guard
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'ComfyUI-update-test'
+          $targetDir = Join-Path $root 'comfy\ldm\minimax'
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          New-Item -ItemType File -Force -Path (Join-Path $root 'main.py') | Out-Null
+          $target = Join-Path $targetDir 'model.py'
+          $url = 'https://raw.githubusercontent.com/Comfy-Org/ComfyUI/0764232429b8cfb10b79b6f186c8cb23e0b22897/comfy/ldm/minimax/model.py'
+          Invoke-WebRequest -UseBasicParsing $url -OutFile $target
+          python patch_model.py --comfy-ui $root
+          if ($LASTEXITCODE -ne 0) { throw 'Initial patch failed.' }
+
+          $backup = $target + '.te_speed.bak'
+          Copy-Item $backup $target -Force
+          Add-Content -LiteralPath $target -Value '# simulated newer stock file'
+          $before = (Get-FileHash $target -Algorithm SHA256).Hash
+          python patch_model.py --comfy-ui $root --revert
+          if ($LASTEXITCODE -ne 0) { throw 'Safe revert guard returned failure.' }
+          $after = (Get-FileHash $target -Algorithm SHA256).Hash
+          if ($before -ne $after) { throw 'Safe revert overwrote an unpatched/newer core file.' }
